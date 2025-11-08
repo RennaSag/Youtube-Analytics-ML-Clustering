@@ -1,0 +1,589 @@
+# AIzaSyAjRYvJaFG_LKePbjRkDnuO9LbAFJygA_8
+
+!pip install google-api-python-client pandas matplotlib seaborn numpy tqdm isodate scikit-learn wordcloud -q
+
+from googleapiclient.discovery import build
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+from datetime import datetime
+import isodate
+from collections import Counter
+from wordcloud import WordCloud
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV
+from sklearn.preprocessing import StandardScaler, PowerTransformer, RobustScaler
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import Ridge, Lasso
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error, mean_absolute_percentage_error
+from scipy import stats
+from scipy.stats import spearmanr
+from tqdm import tqdm
+import warnings
+warnings.filterwarnings('ignore')
+
+# CONFIGURAÇÃO E COLETA DE 1000 VÍDEOS
+API_KEY = input("Cole sua API Key do YouTube Data API v3: ")
+youtube = build("youtube", "v3", developerKey=API_KEY)
+
+print("\n Coletando 1000 vídeos mais populares do Brasil...")
+print("Isso pode levar alguns minutos...\n")
+
+videos = []
+next_page_token = None
+videos_coletados = 0
+max_videos = 1000
+
+with tqdm(total=max_videos, desc="Coletando vídeos") as pbar:
+    while videos_coletados < max_videos:
+        try:
+            response = youtube.videos().list(
+                part="snippet,statistics,contentDetails",
+                chart="mostPopular",
+                regionCode="BR",
+                maxResults=50,
+                pageToken=next_page_token
+            ).execute()
+
+            for item in response["items"]:
+                snippet = item["snippet"]
+                video_stats = item.get("statistics", {})  # RENOMEADO
+                content = item.get("contentDetails", {})
+
+                tags = snippet.get("tags", [])
+
+                videos.append({
+                    "video_id": item["id"],
+                    "titulo": snippet["title"],
+                    "canal": snippet["channelTitle"],
+                    "categoria_id": snippet.get("categoryId", ""),
+                    "publicado_em": snippet["publishedAt"],
+                    "views": int(video_stats.get("viewCount", 0)),
+                    "likes": int(video_stats.get("likeCount", 0)) if "likeCount" in video_stats else np.nan,
+                    "comentarios": int(video_stats.get("commentCount", 0)) if "commentCount" in video_stats else np.nan,
+                    "duracao": content.get("duration", None),
+                    "tags": tags,
+                    "num_tags": len(tags)
+                })
+
+                videos_coletados += 1
+                pbar.update(1)
+
+                if videos_coletados >= max_videos:
+                    break
+
+            next_page_token = response.get("nextPageToken")
+            if not next_page_token:
+                break
+
+        except Exception as e:
+            print(f"\n Erro na coleta: {e}")
+            break
+
+df = pd.DataFrame(videos)
+print(f"\n {len(df)} vídeos coletados com sucesso!\n")
+display(df.head())
+
+# ANÁLISE DE TAGS
+print("\n" + "="*60)
+print(" ANÁLISE PROFUNDA DAS TAGS")
+print("="*60)
+
+videos_com_tags = df[df["num_tags"] > 0]
+print(f"\n Estatísticas de Tags:")
+print(f"   Vídeos com tags: {len(videos_com_tags)} ({len(videos_com_tags)/len(df)*100:.1f}%)")
+print(f"   Vídeos sem tags: {len(df) - len(videos_com_tags)} ({(len(df)-len(videos_com_tags))/len(df)*100:.1f}%)")
+print(f"   Média de tags por vídeo: {df['num_tags'].mean():.2f}")
+print(f"   Mediana de tags: {df['num_tags'].median():.0f}")
+print(f"   Máximo de tags: {df['num_tags'].max():.0f}")
+
+todas_tags = []
+for tags_list in df["tags"]:
+    if isinstance(tags_list, list):
+        todas_tags.extend([tag.lower().strip() for tag in tags_list])
+
+print(f"\n   Total de tags coletadas: {len(todas_tags):,}")
+print(f"   Tags únicas: {len(set(todas_tags)):,}")
+
+tag_counter = Counter(todas_tags)
+top_tags = tag_counter.most_common(50)
+
+print(f"\n TOP 50 TAGS MAIS USADAS:\n")
+top_tags_df = pd.DataFrame(top_tags, columns=["Tag", "Frequência"])
+top_tags_df["% dos vídeos"] = (top_tags_df["Frequência"] / len(df) * 100).round(2)
+display(top_tags_df)
+
+# Visualização top 20 Tags
+plt.figure(figsize=(12, 8))
+top_20 = top_tags_df.head(20)
+sns.barplot(data=top_20, y="Tag", x="Frequência", palette="rocket")
+plt.title("Top 20 Tags Mais Usadas nos Vídeos Populares", fontsize=14, weight="bold")
+plt.xlabel("Frequência de Uso")
+plt.ylabel("Tag")
+plt.tight_layout()
+plt.show()
+
+# Word Cloud das tags
+plt.figure(figsize=(14, 8))
+wordcloud = WordCloud(
+    width=1400,
+    height=800,
+    background_color='white',
+    colormap='viridis',
+    max_words=100
+).generate_from_frequencies(tag_counter)
+
+plt.imshow(wordcloud, interpolation='bilinear')
+plt.axis('off')
+plt.title("Nuvem de Palavras - Tags Mais Populares", fontsize=16, weight="bold", pad=20)
+plt.tight_layout()
+plt.show()
+
+# Análise de co-ocorrência
+print("\n ANÁLISE DE CO-OCORRÊNCIA DE TAGS:")
+print("(Tags que aparecem frequentemente juntas)\n")
+
+tag_pairs = []
+for tags_list in df["tags"]:
+    if isinstance(tags_list, list) and len(tags_list) > 1:
+        tags_lower = [tag.lower().strip() for tag in tags_list]
+        for i in range(len(tags_lower)):
+            for j in range(i+1, len(tags_lower)):
+                tag_pairs.append(tuple(sorted([tags_lower[i], tags_lower[j]])))
+
+pair_counter = Counter(tag_pairs)
+top_pairs = pair_counter.most_common(20)
+
+print("Top 20 Pares de Tags:")
+for i, (pair, count) in enumerate(top_pairs, 1):
+    print(f"   {i}. '{pair[0]}' + '{pair[1]}': {count}x")
+
+# Tags por categoria de views
+df["categoria_views"] = pd.cut(df["views"], bins=5, labels=["Muito Baixo", "Baixo", "Médio", "Alto", "Muito Alto"])
+tags_por_categoria = df.groupby("categoria_views")["num_tags"].mean()
+
+plt.figure(figsize=(10, 6))
+tags_por_categoria.plot(kind="bar", color="#e74c3c")
+plt.title("Número Médio de Tags por Categoria de Views", fontsize=13, weight="bold")
+plt.xlabel("Categoria de Views")
+plt.ylabel("Média de Tags")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+# PRÉ-PROCESSAMENTO
+print("\n" + "="*60)
+print(" PRÉ-PROCESSAMENTO DOS DADOS")
+print("="*60)
+
+df["publicado_em"] = pd.to_datetime(df["publicado_em"])
+
+def duration_to_minutes(d):
+    try:
+        td = isodate.parse_duration(d)
+        return td.total_seconds() / 60
+    except:
+        return np.nan
+
+df["duracao_min"] = df["duracao"].apply(duration_to_minutes)
+df.drop(columns=["duracao"], inplace=True)
+
+df.fillna({
+    "likes": 0,
+    "comentarios": 0,
+    "duracao_min": df["duracao_min"].mean(),
+    "num_tags": 0
+}, inplace=True)
+
+# Feature Engineering
+df["engajamento"] = (df["likes"] + df["comentarios"]) / df["views"].replace(0, 1)
+df["publicado_em"] = df["publicado_em"].dt.tz_localize(None)
+df["idade_video_dias"] = (datetime.now() - df["publicado_em"]).dt.days
+df["views_por_dia"] = df["views"] / df["idade_video_dias"].replace(0, 1)
+df["like_rate"] = df["likes"] / df["views"].replace(0, 1)
+df["comment_rate"] = df["comentarios"] / df["views"].replace(0, 1)
+df["titulo_length"] = df["titulo"].str.len()
+df["tem_tags"] = (df["num_tags"] > 0).astype(int)
+
+# Remover outliers extremos antes do ML
+print("\n Removendo outliers extremos...")
+Q1 = df["views_por_dia"].quantile(0.25)
+Q3 = df["views_por_dia"].quantile(0.75)
+IQR = Q3 - Q1
+lower_bound = Q1 - 3 * IQR
+upper_bound = Q3 + 3 * IQR
+
+df_clean = df[(df["views_por_dia"] >= lower_bound) & (df["views_por_dia"] <= upper_bound)].copy()
+print(f"   Vídeos antes: {len(df)}")
+print(f"   Vídeos após remoção de outliers: {len(df_clean)}")
+print(f"   Outliers removidos: {len(df) - len(df_clean)}")
+
+# ANÁLISE EXPLORATÓRIA
+print("\n" + "="*60)
+print(" ANÁLISE EXPLORATÓRIA")
+print("="*60)
+
+sns.set_theme(style="whitegrid", palette="Spectral")
+
+
+print("\n Estatísticas Descritivas:\n")
+# Configurar pandas para exibir em notação científica
+pd.options.display.float_format = '{:.2e}'.format
+display(df_clean[["views","likes","comentarios","duracao_min","engajamento","views_por_dia","num_tags"]].describe())
+# Resetar formato padrão
+pd.reset_option('display.float_format')
+
+plt.figure(figsize=(12,8))
+sns.heatmap(df_clean[["views","likes","comentarios","duracao_min","engajamento","views_por_dia",
+                 "like_rate","comment_rate","num_tags","tem_tags"]].corr(),
+            annot=True, cmap="YlGnBu", fmt=".2f", cbar_kws={'label': 'Correlação'})
+plt.title("Correlação entre Métricas dos Vídeos (incluindo Tags)", fontsize=14, weight="bold")
+plt.tight_layout()
+plt.show()
+
+
+
+# Impacto das tags nas visualizações
+print("\n IMPACTO DAS TAGS NAS MÉTRICAS:")
+com_tags = df_clean[df_clean["tem_tags"] == 1]
+sem_tags = df_clean[df_clean["tem_tags"] == 0]
+
+print(f"\n Vídeos COM tags:")
+print(f"   Views médias: {com_tags['views'].mean():,.0f}")
+print(f"   Engajamento médio: {com_tags['engajamento'].mean()*100:.4f}%")
+print(f"   Views/dia médias: {com_tags['views_por_dia'].mean():,.0f}")
+
+print(f"\n Vídeos SEM tags:")
+print(f"   Views médias: {sem_tags['views'].mean():,.0f}")
+print(f"   Engajamento médio: {sem_tags['engajamento'].mean()*100:.4f}%")
+print(f"   Views/dia médias: {sem_tags['views_por_dia'].mean():,.0f}")
+
+
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
+from sklearn.mixture import GaussianMixture
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
+from scipy.cluster.hierarchy import dendrogram, linkage
+from scipy.spatial.distance import cdist
+
+print("\n" + "="*60)
+print(" PREPARAÇÃO PARA CLUSTERIZAÇÃO")
+print("="*60)
+
+features_clustering = ["views_por_dia", "engajamento", "like_rate", "comment_rate", 
+                       "duracao_min", "num_tags", "idade_video_dias", "titulo_length"]
+
+X_cluster = df_clean[features_clustering].copy()
+
+scaler_cluster = RobustScaler()
+X_cluster_scaled = scaler_cluster.fit_transform(X_cluster)
+
+print(f"\nDados preparados: {X_cluster_scaled.shape[0]} vídeos, {X_cluster_scaled.shape[1]} features")
+
+print("\n" + "="*60)
+print(" MÉTODO DO COTOVELO - DETERMINAÇÃO DO K IDEAL")
+print("="*60)
+
+inertias = []
+silhouette_scores = []
+K_range = range(2, 11)
+
+print("\nCalculando métricas para diferentes valores de K...")
+for k in K_range:
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+    kmeans.fit(X_cluster_scaled)
+    inertias.append(kmeans.inertia_)
+    silhouette_scores.append(silhouette_score(X_cluster_scaled, kmeans.labels_))
+    print(f"K={k}: Inertia={kmeans.inertia_:.2f}, Silhouette={silhouette_scores[-1]:.4f}")
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+axes[0].plot(K_range, inertias, 'bo-', linewidth=2, markersize=8)
+axes[0].set_xlabel('Número de Clusters (K)')
+axes[0].set_ylabel('Inércia')
+axes[0].set_title('Método do Cotovelo')
+axes[0].grid(True, alpha=0.3)
+
+axes[1].plot(K_range, silhouette_scores, 'ro-', linewidth=2, markersize=8)
+axes[1].set_xlabel('Número de Clusters (K)')
+axes[1].set_ylabel('Silhouette Score')
+axes[1].set_title('Análise de Silhueta')
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+optimal_k = silhouette_scores.index(max(silhouette_scores)) + 2
+print(f"\nK ótimo sugerido (maior Silhouette): {optimal_k}")
+
+print("\n" + "="*60)
+print(" K-MEANS CLUSTERING")
+print("="*60)
+
+kmeans_final = KMeans(n_clusters=optimal_k, random_state=42, n_init=10)
+df_clean['cluster_kmeans'] = kmeans_final.fit_predict(X_cluster_scaled)
+
+silhouette_kmeans = silhouette_score(X_cluster_scaled, df_clean['cluster_kmeans'])
+davies_bouldin_kmeans = davies_bouldin_score(X_cluster_scaled, df_clean['cluster_kmeans'])
+calinski_harabasz_kmeans = calinski_harabasz_score(X_cluster_scaled, df_clean['cluster_kmeans'])
+
+print(f"\nMétricas K-Means (K={optimal_k}):")
+print(f"  Silhouette Score: {silhouette_kmeans:.4f}")
+print(f"  Davies-Bouldin Index: {davies_bouldin_kmeans:.4f}")
+print(f"  Calinski-Harabasz Index: {calinski_harabasz_kmeans:.2f}")
+
+print("\nDistribuição dos clusters:")
+print(df_clean['cluster_kmeans'].value_counts().sort_index())
+
+print("\n" + "="*60)
+print(" DBSCAN CLUSTERING")
+print("="*60)
+
+dbscan = DBSCAN(eps=0.5, min_samples=5)
+df_clean['cluster_dbscan'] = dbscan.fit_predict(X_cluster_scaled)
+
+n_clusters_dbscan = len(set(df_clean['cluster_dbscan'])) - (1 if -1 in df_clean['cluster_dbscan'] else 0)
+n_noise = list(df_clean['cluster_dbscan']).count(-1)
+
+print(f"\nResultados DBSCAN:")
+print(f"  Número de clusters: {n_clusters_dbscan}")
+print(f"  Pontos de ruído (outliers): {n_noise}")
+print(f"  Percentual de outliers: {n_noise/len(df_clean)*100:.2f}%")
+
+if n_clusters_dbscan > 1:
+    mask = df_clean['cluster_dbscan'] != -1
+    silhouette_dbscan = silhouette_score(X_cluster_scaled[mask], df_clean.loc[mask, 'cluster_dbscan'])
+    print(f"  Silhouette Score (sem outliers): {silhouette_dbscan:.4f}")
+
+print("\nDistribuição dos clusters DBSCAN:")
+print(df_clean['cluster_dbscan'].value_counts().sort_index())
+
+print("\n" + "="*60)
+print(" HIERARCHICAL CLUSTERING")
+print("="*60)
+
+hierarchical = AgglomerativeClustering(n_clusters=optimal_k, linkage='ward')
+df_clean['cluster_hierarchical'] = hierarchical.fit_predict(X_cluster_scaled)
+
+silhouette_hier = silhouette_score(X_cluster_scaled, df_clean['cluster_hierarchical'])
+print(f"\nMétricas Hierarchical Clustering:")
+print(f"  Silhouette Score: {silhouette_hier:.4f}")
+print(f"  Número de clusters: {optimal_k}")
+
+print("\nDistribuição dos clusters:")
+print(df_clean['cluster_hierarchical'].value_counts().sort_index())
+
+sample_size = min(100, len(df_clean))
+sample_indices = np.random.choice(len(df_clean), sample_size, replace=False)
+X_sample = X_cluster_scaled[sample_indices]
+
+linkage_matrix = linkage(X_sample, method='ward')
+
+plt.figure(figsize=(14, 6))
+dendrogram(linkage_matrix, truncate_mode='lastp', p=30)
+plt.title('Dendrograma - Hierarchical Clustering (amostra de 100 vídeos)', fontsize=13, weight='bold')
+plt.xlabel('Índice da Amostra')
+plt.ylabel('Distância')
+plt.tight_layout()
+plt.show()
+
+print("\n" + "="*60)
+print(" GAUSSIAN MIXTURE MODEL")
+print("="*60)
+
+gmm = GaussianMixture(n_components=optimal_k, random_state=42, covariance_type='full')
+df_clean['cluster_gmm'] = gmm.fit_predict(X_cluster_scaled)
+df_clean['cluster_gmm_proba'] = gmm.predict_proba(X_cluster_scaled).max(axis=1)
+
+print(f"\nMétricas GMM:")
+print(f"  BIC: {gmm.bic(X_cluster_scaled):.2f}")
+print(f"  AIC: {gmm.aic(X_cluster_scaled):.2f}")
+print(f"  Log-Likelihood: {gmm.score(X_cluster_scaled):.2f}")
+
+silhouette_gmm = silhouette_score(X_cluster_scaled, df_clean['cluster_gmm'])
+print(f"  Silhouette Score: {silhouette_gmm:.4f}")
+
+print(f"\nProbabilidade média de pertencimento: {df_clean['cluster_gmm_proba'].mean():.4f}")
+print(f"Mínima probabilidade: {df_clean['cluster_gmm_proba'].min():.4f}")
+print(f"Máxima probabilidade: {df_clean['cluster_gmm_proba'].max():.4f}")
+
+print("\n" + "="*60)
+print(" REDUÇÃO DIMENSIONAL E VISUALIZAÇÃO")
+print("="*60)
+
+print("\nAplicando PCA...")
+pca = PCA(n_components=2, random_state=42)
+X_pca = pca.fit_transform(X_cluster_scaled)
+df_clean['pca_1'] = X_pca[:, 0]
+df_clean['pca_2'] = X_pca[:, 1]
+
+print(f"Variância explicada: {pca.explained_variance_ratio_.sum()*100:.2f}%")
+print(f"  PC1: {pca.explained_variance_ratio_[0]*100:.2f}%")
+print(f"  PC2: {pca.explained_variance_ratio_[1]*100:.2f}%")
+
+print("\nAplicando t-SNE (pode levar alguns minutos)...")
+tsne = TSNE(n_components=2, random_state=42, perplexity=30, n_iter=1000)
+X_tsne = tsne.fit_transform(X_cluster_scaled)
+df_clean['tsne_1'] = X_tsne[:, 0]
+df_clean['tsne_2'] = X_tsne[:, 1]
+
+fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+
+scatter1 = axes[0, 0].scatter(df_clean['pca_1'], df_clean['pca_2'], 
+                               c=df_clean['cluster_kmeans'], cmap='viridis', 
+                               alpha=0.6, s=30)
+axes[0, 0].set_xlabel('Componente Principal 1')
+axes[0, 0].set_ylabel('Componente Principal 2')
+axes[0, 0].set_title('K-Means Clustering (PCA)')
+axes[0, 0].grid(True, alpha=0.3)
+plt.colorbar(scatter1, ax=axes[0, 0], label='Cluster')
+
+scatter2 = axes[0, 1].scatter(df_clean['tsne_1'], df_clean['tsne_2'], 
+                               c=df_clean['cluster_kmeans'], cmap='viridis', 
+                               alpha=0.6, s=30)
+axes[0, 1].set_xlabel('t-SNE Dimensão 1')
+axes[0, 1].set_ylabel('t-SNE Dimensão 2')
+axes[0, 1].set_title('K-Means Clustering (t-SNE)')
+axes[0, 1].grid(True, alpha=0.3)
+plt.colorbar(scatter2, ax=axes[0, 1], label='Cluster')
+
+mask_dbscan = df_clean['cluster_dbscan'] != -1
+scatter3 = axes[1, 0].scatter(df_clean.loc[mask_dbscan, 'pca_1'], 
+                               df_clean.loc[mask_dbscan, 'pca_2'], 
+                               c=df_clean.loc[mask_dbscan, 'cluster_dbscan'], 
+                               cmap='plasma', alpha=0.6, s=30)
+axes[1, 0].scatter(df_clean.loc[~mask_dbscan, 'pca_1'], 
+                   df_clean.loc[~mask_dbscan, 'pca_2'], 
+                   c='red', marker='x', s=50, label='Outliers')
+axes[1, 0].set_xlabel('Componente Principal 1')
+axes[1, 0].set_ylabel('Componente Principal 2')
+axes[1, 0].set_title('DBSCAN Clustering (PCA)')
+axes[1, 0].legend()
+axes[1, 0].grid(True, alpha=0.3)
+plt.colorbar(scatter3, ax=axes[1, 0], label='Cluster')
+
+scatter4 = axes[1, 1].scatter(df_clean['pca_1'], df_clean['pca_2'], 
+                               c=df_clean['cluster_gmm_proba'], cmap='coolwarm', 
+                               alpha=0.6, s=30)
+axes[1, 1].set_xlabel('Componente Principal 1')
+axes[1, 1].set_ylabel('Componente Principal 2')
+axes[1, 1].set_title('GMM - Probabilidade de Pertencimento (PCA)')
+axes[1, 1].grid(True, alpha=0.3)
+plt.colorbar(scatter4, ax=axes[1, 1], label='Probabilidade')
+
+plt.tight_layout()
+plt.show()
+
+print("\n" + "="*60)
+print(" ANÁLISE DOS CLUSTERS K-MEANS")
+print("="*60)
+
+for cluster_id in sorted(df_clean['cluster_kmeans'].unique()):
+    cluster_data = df_clean[df_clean['cluster_kmeans'] == cluster_id]
+    
+    print(f"\nCLUSTER {cluster_id} (n={len(cluster_data)}):")
+    print(f"  Views médias: {cluster_data['views'].mean():,.0f}")
+    print(f"  Views/dia médias: {cluster_data['views_por_dia'].mean():,.0f}")
+    print(f"  Engajamento médio: {cluster_data['engajamento'].mean()*100:.4f}%")
+    print(f"  Like rate médio: {cluster_data['like_rate'].mean()*100:.4f}%")
+    print(f"  Comment rate médio: {cluster_data['comment_rate'].mean()*100:.4f}%")
+    print(f"  Duração média: {cluster_data['duracao_min'].mean():.2f} min")
+    print(f"  Número médio de tags: {cluster_data['num_tags'].mean():.2f}")
+    print(f"  Idade média do vídeo: {cluster_data['idade_video_dias'].mean():.0f} dias")
+
+cluster_summary = df_clean.groupby('cluster_kmeans')[features_clustering].mean()
+print("\nResumo Estatístico dos Clusters:")
+display(cluster_summary)
+
+fig, axes = plt.subplots(2, 4, figsize=(18, 10))
+axes = axes.flatten()
+
+for idx, feature in enumerate(features_clustering):
+    df_clean.boxplot(column=feature, by='cluster_kmeans', ax=axes[idx])
+    axes[idx].set_title(f'{feature}')
+    axes[idx].set_xlabel('Cluster')
+    axes[idx].get_figure().suptitle('')
+
+plt.tight_layout()
+plt.show()
+
+print("\n" + "="*60)
+print(" COMPARAÇÃO DE ALGORITMOS")
+print("="*60)
+
+comparison_df = pd.DataFrame({
+    'Algoritmo': ['K-Means', 'DBSCAN', 'Hierarchical', 'GMM'],
+    'Silhouette Score': [silhouette_kmeans, 
+                         silhouette_dbscan if n_clusters_dbscan > 1 else np.nan,
+                         silhouette_hier, 
+                         silhouette_gmm],
+    'Número de Clusters': [optimal_k, n_clusters_dbscan, optimal_k, optimal_k],
+    'Outliers': [0, n_noise, 0, 0]
+})
+
+display(comparison_df)
+
+plt.figure(figsize=(10, 6))
+valid_algos = comparison_df[comparison_df['Silhouette Score'].notna()]
+plt.bar(valid_algos['Algoritmo'], valid_algos['Silhouette Score'], color=['#3498db', '#e74c3c', '#2ecc71', '#f39c12'])
+plt.ylabel('Silhouette Score')
+plt.title('Comparação de Performance dos Algoritmos de Clusterização', fontsize=13, weight='bold')
+plt.ylim(0, max(valid_algos['Silhouette Score']) * 1.2)
+plt.grid(True, alpha=0.3, axis='y')
+plt.tight_layout()
+plt.show()
+
+print("\n" + "="*60)
+print(" ANÁLISE DE TAGS POR CLUSTER")
+print("="*60)
+
+for cluster_id in sorted(df_clean['cluster_kmeans'].unique()):
+    cluster_videos = df_clean[df_clean['cluster_kmeans'] == cluster_id]
+    
+    cluster_tags = []
+    for tags_list in cluster_videos['tags']:
+        if isinstance(tags_list, list):
+            cluster_tags.extend([tag.lower().strip() for tag in tags_list])
+    
+    if len(cluster_tags) > 0:
+        tag_counter_cluster = Counter(cluster_tags)
+        top_tags_cluster = tag_counter_cluster.most_common(10)
+        
+        print(f"\nTop 10 Tags do CLUSTER {cluster_id}:")
+        for i, (tag, count) in enumerate(top_tags_cluster, 1):
+            print(f"  {i}. '{tag}': {count}x")
+
+print("\n" + "="*60)
+print(" REGRESSÃO POR CLUSTER")
+print("="*60)
+
+for cluster_id in sorted(df_clean['cluster_kmeans'].unique()):
+    cluster_mask = df_clean['cluster_kmeans'] == cluster_id
+    X_cluster_reg = X_cluster_scaled[cluster_mask]
+    y_cluster_reg = np.log1p(df_clean.loc[cluster_mask, 'views_por_dia'])
+    
+    if len(X_cluster_reg) > 10:
+        X_train_c, X_test_c, y_train_c, y_test_c = train_test_split(
+            X_cluster_reg, y_cluster_reg, test_size=0.2, random_state=42
+        )
+        
+        rf_cluster = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+        rf_cluster.fit(X_train_c, y_train_c)
+        
+        y_pred_c = rf_cluster.predict(X_test_c)
+        r2_cluster = r2_score(y_test_c, y_pred_c)
+        rmse_cluster = np.sqrt(mean_squared_error(y_test_c, y_pred_c))
+        
+        print(f"\nCLUSTER {cluster_id} (n={len(X_cluster_reg)}):")
+        print(f"  R²: {r2_cluster:.4f}")
+        print(f"  RMSE: {rmse_cluster:.4f}")
+
+print("\nAnálise de clusterização completa!")
+print("="*60)
+
+
+
+
+print("\n Análise completa finalizada!")
+print("="*60)

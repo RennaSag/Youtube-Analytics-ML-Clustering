@@ -1,6 +1,6 @@
 # Relatório Técnico - Análise de Tags no YouTube
 
-**Instituto Federal Goiano - Campus Iporá**
+**Instituto Federal Goiano**
 
 **Projeto de Machine Learning para Identificação das Tags Mais Frequentes em Vídeos do YouTube**
 
@@ -8,7 +8,7 @@
 
 **Data:** 2025
 
-**Local:** Iporá - Goiás
+**Local:** Goiás
 
 ---
 
